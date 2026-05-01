@@ -1,69 +1,82 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useTransition } from "react";
 
 type TreeNode = {
   name: string;
+  path: string;
   children: Map<string, TreeNode>;
   isFile: boolean;
 };
 
-const HARD_EXCLUDES = new Set(["node_modules", ".next", ".git", ".turbo", ".vercel"]);
+const ALWAYS_BLOCKED = new Set([
+  "node_modules",
+  ".next",
+  "dist",
+  "build",
+  ".git",
+  ".turbo",
+  ".vercel",
+  "out",
+  ".cache",
+]);
 
-const SOFT_EXCLUDE_OPTIONS = [
-  { label: "dist", value: "dist" },
-  { label: "build", value: "build" },
-  { label: ".cache", value: ".cache" },
+const SOFT_OPTIONS = [
   { label: "coverage", value: "coverage" },
-  { label: "out", value: "out" },
+  { label: "tmp", value: "tmp" },
+  { label: "logs", value: "logs" },
   { label: ".DS_Store", value: ".DS_Store" },
+  { label: "*.log", value: ".log" },
 ];
 
-function createNode(name: string, isFile: boolean): TreeNode {
-  return { name, children: new Map(), isFile };
+function makeNode(name: string, path: string, isFile: boolean): TreeNode {
+  return { name, path, children: new Map(), isFile };
 }
 
-function buildTree(files: FileList, excludes: Set<string>): TreeNode {
-  const root = createNode("root", false);
-
+function buildTree(files: FileList, softExcludes: Set<string>): TreeNode {
+  const root = makeNode("root", "", false);
   for (let i = 0; i < files.length; i++) {
-    const file = files[i] as File & { webkitRelativePath: string };
-    const parts = file.webkitRelativePath.split("/");
-
+    const f = files[i] as File & { webkitRelativePath: string };
+    const parts = f.webkitRelativePath.split("/");
     let skip = false;
-    for (const part of parts) {
-      if (excludes.has(part)) { skip = true; break; }
+    for (const seg of parts) {
+      if (ALWAYS_BLOCKED.has(seg) || softExcludes.has(seg)) {
+        skip = true;
+        break;
+      }
+      if (softExcludes.has(".log") && seg.endsWith(".log")) {
+        skip = true;
+        break;
+      }
     }
     if (skip) continue;
-
-    let current = root;
+    let cur = root;
     for (let j = 1; j < parts.length; j++) {
-      const part = parts[j];
-      const isLast = j === parts.length - 1;
-      if (!current.children.has(part)) {
-        current.children.set(part, createNode(part, isLast));
-      }
-      current = current.children.get(part)!;
+      const seg = parts[j];
+      const nodePath = parts.slice(1, j + 1).join("/");
+      const isFile = j === parts.length - 1;
+      if (!cur.children.has(seg))
+        cur.children.set(seg, makeNode(seg, nodePath, isFile));
+      cur = cur.children.get(seg)!;
     }
   }
-
   return root;
 }
 
-function getTopLevelDirs(root: TreeNode): string[] {
-  const dirs: string[] = [];
-  for (const [name, node] of root.children) {
-    if (!node.isFile) dirs.push(name);
+function collectDirs(node: TreeNode, result: TreeNode[] = []): TreeNode[] {
+  for (const child of node.children.values()) {
+    if (!child.isFile) {
+      result.push(child);
+      collectDirs(child, result);
+    }
   }
-  return dirs.sort((a, b) => a.localeCompare(b));
+  return result;
 }
 
-function sortedEntries(node: TreeNode): TreeNode[] {
-  const dirs: TreeNode[] = [];
-  const files: TreeNode[] = [];
-  for (const child of node.children.values()) {
-    (child.isFile ? files : dirs).push(child);
-  }
+function sorted(node: TreeNode): TreeNode[] {
+  const dirs: TreeNode[] = [],
+    files: TreeNode[] = [];
+  for (const c of node.children.values()) (c.isFile ? files : dirs).push(c);
   dirs.sort((a, b) => a.name.localeCompare(b.name));
   files.sort((a, b) => a.name.localeCompare(b.name));
   return [...dirs, ...files];
@@ -73,86 +86,73 @@ function renderNode(
   node: TreeNode,
   prefix: string,
   isLast: boolean,
-  collapsedDirs: Set<string>,
-  isTopLevel: boolean
+  collapsed: Set<string>,
 ): string {
-  const connector = isLast ? "└── " : "├── ";
-  const childPrefix = prefix + (isLast ? "    " : "│   ");
-  const trailingSlash = !node.isFile ? "/" : "";
-  let out = prefix + connector + node.name + trailingSlash + "\n";
-
-  if (!node.isFile) {
-    const shouldCollapse = isTopLevel && collapsedDirs.has(node.name);
-    if (!shouldCollapse) {
-      const children = sortedEntries(node);
-      children.forEach((child, idx) => {
-        out += renderNode(child, childPrefix, idx === children.length - 1, collapsedDirs, false);
-      });
-    }
+  const conn = isLast ? "└── " : "├── ";
+  const childPfx = prefix + (isLast ? "    " : "│   ");
+  let out = prefix + conn + node.name + (node.isFile ? "" : "/") + "\n";
+  if (!node.isFile && !collapsed.has(node.path)) {
+    const kids = sorted(node);
+    kids.forEach((k, i) => {
+      out += renderNode(k, childPfx, i === kids.length - 1, collapsed);
+    });
   }
-
   return out;
 }
 
-function generateTree(root: TreeNode, collapsedDirs: Set<string>): string {
-  const children = sortedEntries(root);
+function generateTree(root: TreeNode, collapsed: Set<string>): string {
+  const kids = sorted(root);
   let out = ".\n";
-  children.forEach((child, idx) => {
-    out += renderNode(child, "", idx === children.length - 1, collapsedDirs, !child.isFile);
+  kids.forEach((k, i) => {
+    out += renderNode(k, "", i === kids.length - 1, collapsed);
   });
   return out.trim();
 }
 
 export default function TreeGenerator() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [isPending, startTransition] = useTransition();
   const [rootNode, setRootNode] = useState<TreeNode | null>(null);
+  const [allDirs, setAllDirs] = useState<TreeNode[]>([]);
   const [projectName, setProjectName] = useState("");
   const [fileCount, setFileCount] = useState(0);
-  const [topLevelDirs, setTopLevelDirs] = useState<string[]>([]);
-  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
-  const [softExcludes, setSoftExcludes] = useState<Set<string>>(new Set(["dist", "build", "out"]));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [softExcludes, setSoftExcludes] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
 
-  const allExcludes = new Set([...HARD_EXCLUDES, ...softExcludes]);
+  const tree = rootNode ? generateTree(rootNode, collapsed) : "";
+  const lineCount = tree ? tree.split("\n").length : 0;
 
-  const tree = rootNode ? generateTree(rootNode, collapsedDirs) : "";
-
-  function handleFiles(files: FileList) {
-    const first = files[0] as File & { webkitRelativePath: string };
-    const name = first.webkitRelativePath.split("/")[0];
-    setProjectName(name);
-    setFileCount(files.length);
-    setCollapsedDirs(new Set());
-
-    const root = buildTree(files, allExcludes);
-    setRootNode(root);
-    setTopLevelDirs(getTopLevelDirs(root));
+  function processFiles(files: FileList, excl: Set<string>) {
+    startTransition(() => {
+      const first = files[0] as File & { webkitRelativePath: string };
+      const name = first.webkitRelativePath.split("/")[0];
+      const root = buildTree(files, excl);
+      const dirs = collectDirs(root);
+      setProjectName(name);
+      setFileCount(files.length);
+      setRootNode(root);
+      setAllDirs(dirs);
+      setCollapsed(new Set());
+    });
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    if (e.target.files && e.target.files.length > 0) handleFiles(e.target.files);
+    if (e.target.files?.length) processFiles(e.target.files, softExcludes);
   }
 
-  function toggleCollapse(dir: string) {
-    setCollapsedDirs((prev) => {
+  function toggleSoft(val: string) {
+    setSoftExcludes((prev) => {
       const next = new Set(prev);
-      if (next.has(dir)) {
-        next.delete(dir);
-      } else {
-        next.add(dir);
-      }
+      next.has(val) ? next.delete(val) : next.add(val);
       return next;
     });
   }
 
-  function toggleSoftExclude(val: string) {
-    setSoftExcludes((prev) => {
+  function toggleCollapse(path: string) {
+    setCollapsed((prev) => {
       const next = new Set(prev);
-      if (next.has(val)) {
-        next.delete(val);
-      } else {
-        next.add(val);
-      }
+      next.has(path) ? next.delete(path) : next.add(path);
       return next;
     });
   }
@@ -160,147 +160,236 @@ export default function TreeGenerator() {
   async function handleCopy() {
     await navigator.clipboard.writeText(tree);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 1800);
   }
 
   function handleReset() {
     setRootNode(null);
+    setAllDirs([]);
     setProjectName("");
     setFileCount(0);
-    setTopLevelDirs([]);
-    setCollapsedDirs(new Set());
+    setCollapsed(new Set());
     if (inputRef.current) inputRef.current.value = "";
   }
 
+  const dirsByDepth = allDirs.reduce<Map<number, TreeNode[]>>((acc, d) => {
+    const depth = d.path.split("/").length;
+    if (!acc.has(depth)) acc.set(depth, []);
+    acc.get(depth)!.push(d);
+    return acc;
+  }, new Map());
+
+  const depthLevels = Array.from(dirsByDepth.keys()).sort((a, b) => a - b);
+
   return (
-    <div>
-      <div className="mb-10">
-        <div className="flex items-baseline gap-3 mb-2">
-          <h1
-            className="text-xl font-semibold tracking-tight"
-            style={{ color: "var(--color-text)", letterSpacing: "-0.02em" }}
-          >
-            struct
-          </h1>
-          <span style={{ color: "var(--color-text-muted)", fontSize: "11px" }}>
-            project structure generator
+    <div className="flex flex-col gap-3">
+      <div className="mb-6">
+        <div className="flex items-center gap-2.5 mb-1.5">
+          <span className="label">Dev Tool</span>
+          <span className="w-px h-[10px] bg-border-hi" />
+          <span className="text-[10px] text-text-4">
+            runs locally, nothing uploaded
           </span>
         </div>
-        <div
-          className="h-px w-full mt-4"
-          style={{ background: "var(--color-border)" }}
-        />
-      </div>
+        <h1 className="text-[26px] font-extrabold tracking-[-0.04em] text-text leading-[1.1] mb-2">
+          project <span className="text-accent">struct</span>
+        </h1>
+        <p className="text-[12px] text-text-3">
+          Scan any folder → get a clean ASCII tree. Pick which dirs to collapse.
+        </p>
 
-      <div className="panel p-5 mb-4">
-        <span className="section-label">Folder</span>
-
-        <div
-          className="drop-zone p-10 mb-5"
-          style={{
-            borderColor: rootNode ? "var(--color-border)" : "var(--color-border)",
-            cursor: "pointer",
-          }}
-          onClick={() => inputRef.current?.click()}
-        >
-          <div
-            className="text-xs text-center"
-            style={{ color: rootNode ? "var(--color-accent)" : "var(--color-text-muted)" }}
-          >
-            {rootNode ? (
-              <>
-                <span style={{ color: "var(--color-text)" }}>{projectName}</span>
-                <span style={{ color: "var(--color-text-muted)" }}> — {fileCount} files</span>
-                <span
-                  className="block mt-1"
-                  style={{ fontSize: "10px", color: "var(--color-text-muted)" }}
-                >
-                  click to rescan
-                </span>
-              </>
-            ) : (
-              <>
-                <span style={{ color: "var(--color-text-dim)" }}>click to open folder</span>
-              </>
-            )}
-          </div>
-          <input
-            ref={inputRef}
-            type="file"
-            className="hidden"
-            onChange={handleFileChange}
-            {...({ webkitdirectory: "true", directory: "true" } as React.InputHTMLAttributes<HTMLInputElement>)}
-            multiple
-          />
-        </div>
-
-        <span className="section-label">Exclude</span>
-        <div className="flex flex-wrap gap-2">
-          {[...HARD_EXCLUDES].sort().map((val) => (
-            <span
-              key={val}
-              className="pill-active"
-              style={{
-                opacity: 0.5,
-                cursor: "default",
-              }}
-              title="Always excluded"
-            >
-              {val}
+        <div className="flex flex-wrap items-center gap-1.5 mt-3.5">
+          <span className="text-[10px] text-text-4 mr-1">always excluded:</span>
+          {[...ALWAYS_BLOCKED].sort().map((b) => (
+            <span key={b} className="tag-locked">
+              {b}
             </span>
           ))}
-          {SOFT_EXCLUDE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => toggleSoftExclude(opt.value)}
-              className={softExcludes.has(opt.value) ? "pill-active" : "pill-inactive"}
-            >
-              {opt.label}
-            </button>
-          ))}
         </div>
       </div>
 
-      {topLevelDirs.length > 0 && (
-        <div className="panel p-5 mb-4">
-          <span className="section-label">Collapse directories</span>
-          <div className="flex flex-wrap gap-2">
-            {topLevelDirs.map((dir) => (
-              <button
-                key={dir}
-                onClick={() => toggleCollapse(dir)}
-                className={collapsedDirs.has(dir) ? "pill-active" : "pill-inactive"}
-              >
-                {collapsedDirs.has(dir) ? "↗ " : ""}{dir}/
-              </button>
-            ))}
-          </div>
-          {collapsedDirs.size > 0 && (
-            <button
-              onClick={() => setCollapsedDirs(new Set())}
-              className="mt-3"
-              style={{ color: "var(--color-text-muted)", fontSize: "11px", background: "none", border: "none", cursor: "pointer" }}
-            >
-              expand all
-            </button>
+      <div className="card">
+        <div className="card-header">
+          <span className="label">Folder</span>
+          {rootNode && (
+            <div className="flex items-center gap-2">
+              <span className="stat-pill">
+                <strong>{fileCount.toLocaleString()}</strong> files
+              </span>
+              <span className="stat-pill">
+                <strong>{allDirs.length}</strong> dirs
+              </span>
+            </div>
           )}
+        </div>
+        <div className="card-body flex flex-col gap-[18px]">
+          <div
+            className={`drop-zone ${rootNode ? "drop-zone-filled" : ""}`}
+            onClick={() => inputRef.current?.click()}
+          >
+            {isPending ? (
+              <div className="flex items-center gap-2.5">
+                <span className="scanning-dot" />
+                <span className="text-[12px] text-text-2">scanning…</span>
+              </div>
+            ) : rootNode ? (
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-1.5 mb-1">
+                  <span className="text-accent text-[11px]">✦</span>
+                  <span className="text-text font-bold text-[13px]">
+                    /{projectName}
+                  </span>
+                </div>
+                <span className="text-text-3 text-[11px]">
+                  click to choose a different folder
+                </span>
+              </div>
+            ) : (
+              <>
+                <span className="text-[22px] leading-none text-text-3">⌘</span>
+                <span className="text-text-3 text-[12px]">
+                  click to select project folder
+                </span>
+                <span className="text-text-4 text-[11px]">
+                  node_modules, .next, dist, build automatically skipped
+                </span>
+              </>
+            )}
+            <input
+              ref={inputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFileChange}
+              {...({
+                webkitdirectory: "true",
+                directory: "true",
+              } as React.InputHTMLAttributes<HTMLInputElement>)}
+              multiple
+            />
+          </div>
+
+          <div>
+            <span className="label block mb-2.5">Additional Excludes</span>
+            <div className="flex flex-wrap gap-1.5">
+              {SOFT_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => toggleSoft(opt.value)}
+                  className={
+                    softExcludes.has(opt.value) ? "tag tag-on" : "tag tag-off"
+                  }
+                >
+                  {softExcludes.has(opt.value) && (
+                    <span className="text-[10px]">✕</span>
+                  )}
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {allDirs.length > 0 && (
+        <div className="card">
+          <div className="card-header">
+            <span className="label">Collapse Directories</span>
+            <div className="flex gap-1.5">
+              <button
+                className="btn-ghost"
+                onClick={() => setCollapsed(new Set())}
+              >
+                expand all
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={() =>
+                  setCollapsed(new Set(allDirs.map((d) => d.path)))
+                }
+              >
+                collapse all
+              </button>
+            </div>
+          </div>
+          <div className="card-body flex flex-col gap-4">
+            {depthLevels.map((depth) => {
+              const dirs = dirsByDepth
+                .get(depth)!
+                .slice()
+                .sort((a, b) => a.path.localeCompare(b.path));
+              return (
+                <div key={depth}>
+                  <span className="depth-label">
+                    {depth === 1 ? "root level" : `depth ${depth}`}
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {dirs.map((dir) => {
+                      const isCollapsed = collapsed.has(dir.path);
+                      const parentPath = dir.path
+                        .split("/")
+                        .slice(0, -1)
+                        .join("/");
+                      return (
+                        <button
+                          key={dir.path}
+                          onClick={() => toggleCollapse(dir.path)}
+                          className={
+                            isCollapsed
+                              ? "dir-tag-collapsed"
+                              : "dir-tag-expanded"
+                          }
+                          title={dir.path}
+                        >
+                          {depth > 1 && parentPath && (
+                            <span className="text-text-3 font-normal">
+                              {parentPath}/
+                            </span>
+                          )}
+                          <span className="font-semibold">{dir.name}/</span>
+                          {isCollapsed && (
+                            <span className="text-[10px] opacity-90">↗</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
       {tree && (
-        <div className="panel p-5">
-          <div className="flex items-center justify-between mb-4">
-            <span className="section-label" style={{ marginBottom: 0 }}>Output</span>
+        <div className="card">
+          <div className="card-header">
             <div className="flex items-center gap-2">
-              <button onClick={handleReset} className="icon-btn-ghost">
+              <span className="label">Output</span>
+              <span className="stat-pill">
+                <strong>{lineCount}</strong> lines
+              </span>
+              {collapsed.size > 0 && (
+                <span className="stat-pill">
+                  <strong>{collapsed.size}</strong> collapsed
+                </span>
+              )}
+            </div>
+            <div className="flex gap-1.5">
+              <button className="btn-ghost" onClick={handleReset}>
                 reset
               </button>
-              <button onClick={handleCopy} className="icon-btn-primary">
+              <button className="btn-accent" onClick={handleCopy}>
                 {copied ? "✓ copied" : "copy"}
               </button>
             </div>
           </div>
-          <pre className="tree-output">{tree}</pre>
+          <div className="card-body">
+            <pre className="tree-pre">{tree}</pre>
+            <p className="text-[10px] text-text-4 mt-2.5">
+              node_modules · .next · dist · build · .git · .turbo · .vercel
+              stripped from output
+            </p>
+          </div>
         </div>
       )}
     </div>
