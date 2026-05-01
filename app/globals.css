@@ -14,6 +14,7 @@
   --color-text-3: #e1e1e1;
   --color-text-4: #ededed;
   --color-red: #f06060;
+  --color-yellow: #f0c040;
   
   --radius-card: 10px;
   --radius-zone: 8px;
@@ -180,6 +181,49 @@
       animate-[scanning-pulse_1s_ease-in-out_infinite];
   }
 
+  .mode-tab {
+    @apply inline-flex items-center gap-1.5 rounded-[7px] px-3 py-[6px]
+      text-[11px] font-medium text-text-3 cursor-pointer
+      transition-all duration-150 border border-transparent select-none;
+
+    &:hover {
+      @apply text-text-2;
+    }
+  }
+
+  .mode-tab-active {
+    @apply inline-flex items-center gap-1.5 rounded-[7px] px-3 py-[6px]
+      text-[11px] font-semibold text-text cursor-pointer
+      transition-all duration-150 select-none
+      bg-surface-3 border border-border-hi
+      shadow-[inset_0_1px_0_0_rgba(255,255,255,0.06)];
+  }
+
+  .github-input {
+    @apply flex-1 rounded-btn px-3 py-[6px]
+      text-[12px] font-mono text-text-2
+      bg-surface-2 border border-border
+      outline-none transition-[border-color,box-shadow] duration-150
+      placeholder:text-text-4;
+
+    &:focus {
+      @apply border-accent/40 shadow-[0_0_0_2px_rgba(200,240,64,0.07)];
+    }
+
+    &:disabled {
+      @apply opacity-50 cursor-not-allowed;
+    }
+  }
+
+  .github-error {
+    @apply flex items-center gap-2 px-3 py-2
+      rounded-zone text-[11px] text-red
+      bg-red/7 border border-red/20;
+  }
+
+  .github-warning {
+    @apply flex items-center gap-2 px-3 py-2
+      rounded-zone text-[11px] text-yellow
+      bg-yellow/7 border border-yellow/20;
+  }
 }
-
-
